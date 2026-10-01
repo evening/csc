@@ -7,6 +7,7 @@ import { nasHashCache } from '../../src/db/schema';
 import { eq } from 'drizzle-orm';
 import { makeTmpDir, cleanup, writeTestFile } from '../helpers';
 import { join } from 'node:path';
+import { realpathSync } from 'node:fs';
 
 let workDir: string;
 let drive: string;
@@ -69,5 +70,53 @@ describe('check', () => {
     const out = lines.join('\n');
     expect(out).toMatch(/\d+ files/);
     expect(out).toMatch(/not backed up/);
+  });
+});
+
+describe('check (multiple paths, clutter)', () => {
+  it('checks several roots in one run and sums them in the summary', async () => {
+    await writeTestFile(drive, 'anime/ep1.mkv', 'EP1');
+    await writeTestFile(nas, 'anime/ep1.mkv', 'EP1');
+    await writeTestFile(nas, 'tv/s01e01.mkv', 'TV');
+    await scan({ positional: ['hd3'], flags: { mount: drive } });
+    lines = [];
+    await check({ positional: [join(nas, 'anime'), join(nas, 'tv')], flags: { summary: true } });
+    expect(lines).toEqual(['2 files, 1 backed up, 0 asserted-only, 1 not backed up, 2 B unbacked']);
+  });
+
+  it('ignores Synology/macOS clutter on the NAS', async () => {
+    await writeTestFile(nas, 'show/@eaDir/ep1.mkv/SYNOVIDEO_VIDEO_SCREENSHOT.jpg', 'thumb');
+    await writeTestFile(nas, '#recycle/deleted.mkv', 'old');
+    await writeTestFile(nas, 'show/._ep1.mkv', 'appledouble');
+    await scan({ positional: ['hd3'], flags: { mount: drive } });
+    lines = [];
+    await check({ positional: [nas], flags: {} });
+    expect(lines.filter((l) => l.startsWith('✗'))).toEqual([]);
+  });
+
+  it('progress forced on does not change stdout', async () => {
+    await writeTestFile(nas, 'new.mkv', 'N');
+    const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    lines = [];
+    await check({ positional: [nas], flags: { progress: true } });
+    stderr.mockRestore();
+    expect(lines.filter((l) => l.includes('new.mkv'))).toEqual([`✗ ${join(nas, 'new.mkv')}  not backed up`]);
+  });
+});
+
+describe('check (relative paths)', () => {
+  it('keys the NAS cache by absolute path even when given a relative one', async () => {
+    await writeTestFile(nas, 'anime/ep1.mkv', 'EP1');
+    const cwd = process.cwd();
+    process.chdir(nas);
+    try {
+      await check({ positional: ['anime'], flags: { summary: true } });
+    } finally {
+      process.chdir(cwd);
+    }
+    const db = await openDb();
+    const keys = (await db.select({ p: nasHashCache.path }).from(nasHashCache)).map((r) => r.p);
+    // realpath: on macOS the tmpdir lives under a /var -> /private/var symlink
+    expect(keys).toEqual([join(realpathSync(nas), 'anime/ep1.mkv')]);
   });
 });

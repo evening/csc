@@ -5,6 +5,7 @@ import { resolveMount } from '../config';
 import { readSentinel, writeSentinel } from '../sentinel';
 import { walk } from '../walker';
 import { hashFile } from '../hash';
+import { Progress, progressEnabled } from '../progress';
 import { and, eq, sql } from 'drizzle-orm';
 import { statfs } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -52,91 +53,97 @@ export async function scan(args: Args): Promise<void> {
   const scanRoot = subtree ? join(mount, subtree) : mount;
   const now = () => new Date().toISOString();
   const seenLocationIds = new Set<number>();
+  const progress = new Progress(`scanning ${label}`, progressEnabled(args.flags));
 
   // Sub-stages B + D: walk, hash (or skip on resume), upsert
-  for await (const entry of walk(scanRoot)) {
-    // path_on_drive is always relative to the mount root, not to scanRoot
-    const pathOnDrive = relative(mount, entry.absolutePath);
+  try {
+    for await (const entry of walk(scanRoot)) {
+      progress.file();
+      // path_on_drive is always relative to the mount root, not to scanRoot
+      const pathOnDrive = relative(mount, entry.absolutePath);
 
-    // Sub-stage D: resume optimization — existing scanned row for (drive, path) with
-    // matching size+mtime means the file hasn't changed; skip re-hashing.
-    const existing = (await db
-      .select({
-        locId: locations.id,
-        fileId: locations.fileId,
-        mtime: locations.mtime,
-        fileSize: files.sizeBytes,
-      })
-      .from(locations)
-      .innerJoin(files, eq(files.id, locations.fileId))
-      .where(and(
-        eq(locations.driveId, driveRow.id),
-        eq(locations.pathOnDrive, pathOnDrive),
-        eq(locations.verification, 'scanned'),
-      )))[0];
-
-    if (existing && existing.fileSize === entry.sizeBytes && existing.mtime === entry.mtime) {
-      seenLocationIds.add(existing.locId);
-      continue;
-    }
-
-    // Hash the file (must happen outside the sync transaction)
-    const xxh3 = await hashFile(entry.absolutePath);
-
-    // Sub-stage B: upsert file + location inside a transaction
-    db.transaction((tx) => {
-      // Upsert files by (xxh3, size)
-      const existingFile = tx
-        .select()
-        .from(files)
-        .where(and(eq(files.xxh3, xxh3), eq(files.sizeBytes, entry.sizeBytes)))
-        .all()[0];
-
-      let fileId: number;
-      if (existingFile) {
-        tx.update(files).set({ lastSeen: now() }).where(eq(files.id, existingFile.id)).run();
-        fileId = existingFile.id;
-      } else {
-        const ins = tx
-          .insert(files)
-          .values({ xxh3, sizeBytes: entry.sizeBytes, firstSeen: now(), lastSeen: now() })
-          .returning()
-          .all()[0];
-        fileId = ins!.id;
-      }
-
-      // Upsert location by (file_id, drive_id) — unique constraint
-      const existingLoc = tx
-        .select()
+      // Sub-stage D: resume optimization — existing scanned row for (drive, path) with
+      // matching size+mtime means the file hasn't changed; skip re-hashing.
+      const existing = (await db
+        .select({
+          locId: locations.id,
+          fileId: locations.fileId,
+          mtime: locations.mtime,
+          fileSize: files.sizeBytes,
+        })
         .from(locations)
-        .where(and(eq(locations.fileId, fileId), eq(locations.driveId, driveRow.id)))
-        .all()[0];
+        .innerJoin(files, eq(files.id, locations.fileId))
+        .where(and(
+          eq(locations.driveId, driveRow.id),
+          eq(locations.pathOnDrive, pathOnDrive),
+          eq(locations.verification, 'scanned'),
+        )))[0];
 
-      let locId: number;
-      if (existingLoc) {
-        tx.update(locations)
-          .set({ pathOnDrive, verification: 'scanned', mtime: entry.mtime, recordedAt: now() })
-          .where(eq(locations.id, existingLoc.id))
-          .run();
-        locId = existingLoc.id;
-      } else {
-        const insLoc = tx
-          .insert(locations)
-          .values({
-            fileId,
-            driveId: driveRow.id,
-            pathOnDrive,
-            verification: 'scanned',
-            mtime: entry.mtime,
-            recordedAt: now(),
-          })
-          .returning()
-          .all()[0];
-        locId = insLoc!.id;
+      if (existing && existing.fileSize === entry.sizeBytes && existing.mtime === entry.mtime) {
+        seenLocationIds.add(existing.locId);
+        continue;
       }
 
-      seenLocationIds.add(locId);
-    });
+      // Hash the file (must happen outside the sync transaction)
+      const xxh3 = await hashFile(entry.absolutePath, (n) => progress.hashed(n));
+
+      // Sub-stage B: upsert file + location inside a transaction
+      db.transaction((tx) => {
+        // Upsert files by (xxh3, size)
+        const existingFile = tx
+          .select()
+          .from(files)
+          .where(and(eq(files.xxh3, xxh3), eq(files.sizeBytes, entry.sizeBytes)))
+          .all()[0];
+
+        let fileId: number;
+        if (existingFile) {
+          tx.update(files).set({ lastSeen: now() }).where(eq(files.id, existingFile.id)).run();
+          fileId = existingFile.id;
+        } else {
+          const ins = tx
+            .insert(files)
+            .values({ xxh3, sizeBytes: entry.sizeBytes, firstSeen: now(), lastSeen: now() })
+            .returning()
+            .all()[0];
+          fileId = ins!.id;
+        }
+
+        // Upsert location by (file_id, drive_id) — unique constraint
+        const existingLoc = tx
+          .select()
+          .from(locations)
+          .where(and(eq(locations.fileId, fileId), eq(locations.driveId, driveRow.id)))
+          .all()[0];
+
+        let locId: number;
+        if (existingLoc) {
+          tx.update(locations)
+            .set({ pathOnDrive, verification: 'scanned', mtime: entry.mtime, recordedAt: now() })
+            .where(eq(locations.id, existingLoc.id))
+            .run();
+          locId = existingLoc.id;
+        } else {
+          const insLoc = tx
+            .insert(locations)
+            .values({
+              fileId,
+              driveId: driveRow.id,
+              pathOnDrive,
+              verification: 'scanned',
+              mtime: entry.mtime,
+              recordedAt: now(),
+            })
+            .returning()
+            .all()[0];
+          locId = insLoc!.id;
+        }
+
+        seenLocationIds.add(locId);
+      });
+    }
+  } finally {
+    progress.done();
   }
 
   // Sub-stage C: prune scanned locations within the subtree that were NOT seen this run

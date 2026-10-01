@@ -59,6 +59,8 @@ Scope to a subtree if you don't need to re-walk the whole drive:
 csc scan hd3 movies --mount /Volumes/hd3
 ```
 
+On a terminal, scan shows a live progress line on stderr (`scanning hd3… 12,431 files, 842 GB hashed (152 MB/s), 03:14:05 elapsed`). `--progress` forces it on when output isn't a terminal (a plain line every 30 s, for log files); `--no-progress` turns it off.
+
 Scan also **prunes**: files no longer found on the drive get their location rows removed. Only within the scanned subtree, and only `scanned` rows — manual `asserted` rows are preserved.
 
 ### Check what's backed up
@@ -79,13 +81,37 @@ Walks a NAS path. For each file:
 - `⚠` — only manual assertions back it up (see `csc assert`). Trust at your discretion.
 - `✗` — not in the catalog. Make a backup.
 
+Pass several paths to check them in one run (the summary covers all of them):
+
+```bash
+csc check --summary /Volumes/media/movies /Volumes/media/tv /Volumes/media/vns
+```
+
 Add `--summary` for aggregate counts:
 
 ```
 412 files, 374 backed up, 0 asserted-only, 38 not backed up, 4.1 TB unbacked
 ```
 
+Like `scan`, `check` shows live progress on stderr when it's a terminal (`--progress` / `--no-progress` to override).
+
 `check` is cheap after the first run. It caches NAS file hashes by `(path, size, mtime)`, so re-checking an unchanged subtree is a directory walk plus SQLite lookups — seconds, not hours.
+
+### List what's on a drive
+
+```bash
+csc ls hd3
+csc ls hd3 movies
+```
+
+Every recorded path on the drive (or under one folder of it, by exact prefix), with sizes and a total. Works with the drive on the shelf — it only reads the catalog. Unverified locations are marked `(asserted)`.
+
+```
+movies/inception.mkv        7.4 GB
+movies/the-matrix.mkv       6.1 GB
+shows/foo.s01e01.mkv        1.2 GB   (asserted)
+3 files, 14.7 GB
+```
 
 ### Locate a single file
 
@@ -125,6 +151,16 @@ csc drive rebind hd3 --yes --mount /Volumes/hd3
 If the `.csc-drive-id` sentinel file got deleted by accident, this rewrites it from the recorded UUID. Refuses if a *different* sentinel is present — that's a wrong-drive situation, not a recovery case.
 
 ## How it works
+
+### Clutter is ignored
+
+Every walk (`scan`, `check`, `assert`) skips OS and NAS junk by name, at any depth, along with everything under a matching directory:
+
+- macOS: `.DS_Store`, `._*` (AppleDouble sidecars), `.fseventsd`, `.Spotlight-V100`, `.Trashes`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.metadata_never_index`
+- Synology: `@eaDir` (thumbnails), `#recycle`, `#snapshot`
+- Windows: `Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`
+
+The list lives in `src/walker.ts`. Without it, `check` on a Synology share reports thousands of thumbnail files as "not backed up".
 
 ### Identity is content, not path
 
@@ -188,7 +224,9 @@ src/
   config.ts             # CSC_DB path, mount resolution
   hash.ts               # xxh3 streaming hash
   sentinel.ts           # .csc-drive-id read/write
-  walker.ts             # deterministic recursive file walker
+  walker.ts             # deterministic recursive file walker + clutter ignore list
+  args.ts               # argv parsing (boolean flags never consume a value)
+  progress.ts           # stderr progress line for scan/check
   format.ts             # output helpers (fmtBytes, die)
   db/
     schema.ts           # drizzle table definitions
@@ -213,7 +251,7 @@ tests/
 
 ```bash
 bun run csc <cmd> ...    # invoke the CLI
-bun test                 # full test suite (60 tests across unit + integration)
+bun test                 # full test suite (unit + integration)
 bun run typecheck        # tsc --noEmit
 bun run db:generate      # regenerate the migration from src/db/schema.ts
 ```

@@ -10,12 +10,14 @@ export function hashBytes(bytes: Buffer): string {
   return h.digest().toString('hex').padStart(16, '0');
 }
 
-export function hashFile(path: string): Promise<string> {
+export function hashFile(path: string, onBytes?: (n: number) => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const h = new XXHash3(SEED);
     const stream = createReadStream(path, { highWaterMark: CHUNK_BYTES });
     stream.on('data', (chunk: Buffer | string) => {
-      h.update(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      h.update(buf);
+      onBytes?.(buf.length);
     });
     stream.on('end', () => {
       resolve(h.digest().toString('hex').padStart(16, '0'));

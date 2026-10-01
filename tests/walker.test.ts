@@ -35,6 +35,33 @@ describe('walk', () => {
     expect(seen).not.toContain('.csc-drive-id');
   });
 
+  it('skips macOS / Synology / Windows clutter at any depth', async () => {
+    const junk = await makeTmpDir();
+    await writeTestFile(junk, 'keep.mkv', 'k');
+    await writeTestFile(junk, '.DS_Store', 'x');
+    await writeTestFile(junk, '._keep.mkv', 'x');
+    await writeTestFile(junk, '@eaDir/keep.mkv/SYNOVIDEO_VIDEO_SCREENSHOT.jpg', 'x');
+    await writeTestFile(junk, '#recycle/old.mkv', 'x');
+    await writeTestFile(junk, '.Spotlight-V100/store.db', 'x');
+    await writeTestFile(junk, 'show/@eaDir/thumb.jpg', 'x');
+    await writeTestFile(junk, 'show/Thumbs.db', 'x');
+    await writeTestFile(junk, 'show/ep1.mkv', 'e');
+    const seen: string[] = [];
+    for await (const e of walk(junk)) seen.push(e.relativePath);
+    expect(seen).toEqual(['keep.mkv', 'show/ep1.mkv']);
+    await cleanup(junk);
+  });
+
+  it('does not skip ordinary dotfiles or names that merely contain a clutter name', async () => {
+    const d = await makeTmpDir();
+    await writeTestFile(d, '.hidden-but-real', 'x');
+    await writeTestFile(d, 'my@eaDir-notes.txt', 'x');
+    const seen: string[] = [];
+    for await (const e of walk(d)) seen.push(e.relativePath);
+    expect(seen).toEqual(['.hidden-but-real', 'my@eaDir-notes.txt']);
+    await cleanup(d);
+  });
+
   it('two runs produce identical order', async () => {
     const a: string[] = []; for await (const e of walk(dir)) a.push(e.relativePath);
     const b: string[] = []; for await (const e of walk(dir)) b.push(e.relativePath);

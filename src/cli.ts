@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { die } from './format';
+import { parseArgs, type Args } from './args';
 
 const USAGE = `csc — cold storage catalog
 
@@ -7,33 +8,14 @@ usage:
   csc drive add <label> [--notes "..."]
   csc drive list
   csc drive rebind <label> --yes [--mount <path>]
-  csc scan <label> [path] [--mount <path>]
-  csc check <nas-path> [--summary]
+  csc scan <label> [path] [--mount <path>] [--progress|--no-progress]
+  csc check <nas-path>... [--summary] [--progress|--no-progress]
+  csc ls <label> [subpath]
   csc whereis <nas-path-or-hash>
   csc assert <label> <nas-path> --yes
+
+progress is shown on stderr automatically when it's a terminal.
 `;
-
-type Args = { positional: string[]; flags: Record<string, string | boolean> };
-
-function parseArgs(argv: string[]): Args {
-  const positional: string[] = [];
-  const flags: Record<string, string | boolean> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next != null && !next.startsWith('--')) {
-        flags[key] = next; i++;
-      } else {
-        flags[key] = true;
-      }
-    } else {
-      positional.push(a);
-    }
-  }
-  return { positional, flags };
-}
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -74,6 +56,11 @@ async function main() {
     case 'check': {
       const { check } = await import('./commands/check');
       await check(args);
+      return;
+    }
+    case 'ls': {
+      const { ls } = await import('./commands/ls');
+      await ls(args);
       return;
     }
     case 'whereis': {
